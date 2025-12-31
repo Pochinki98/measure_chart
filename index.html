@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在线Layer7测压墙</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0d0d0d;
+            color: #00ff41;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden; /* 防止出现滚动条 */
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .header {
+            position: absolute;
+            top: 20px;
+            text-align: center;
+            width: 100%;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin: 0;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
+        }
+
+        .status-bar {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        /* 核心数据展示区 */
+        .dashboard {
+            display: flex;
+            gap: 50px;
+            margin-bottom: 20px;
+            z-index: 10;
+        }
+
+        .metric-box {
+            text-align: center;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            min-width: 200px;
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.1);
+        }
+
+        .metric-value {
+            font-size: 60px;
+            font-weight: bold;
+            display: block;
+            text-shadow: 0 0 15px #00ff41;
+        }
+
+        .metric-label {
+            font-size: 14px;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        /* 图表容器 */
+        #chart-container {
+            width: 90%;
+            height: 50vh; /* 占据屏幕高度的一半 */
+            border-top: 1px dashed #333;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Cloudflare Wall Monitor</h1>
+        <div class="status-bar">TARGET: layer7.chongqing.lol | STATUS: <span id="conn-status">CONNECTING...</span></div>
+    </div>
+
+    <div class="dashboard">
+        <div class="metric-box">
+            <span id="rps-display" class="metric-value">--</span>
+            <span class="metric-label">Real-time RPS (Δ)</span>
+        </div>
+        <div class="metric-box">
+            <span id="total-display" class="metric-value" style="font-size: 30px; line-height: 68px;">--</span>
+            <span class="metric-label">Total Requests This Month</span>
+        </div>
+    </div>
+
+    <div id="chart-container"></div>
+
+    <script>
+        // === 配置区域 ===
+        const API_URL = "https://r.beggar.top/stream";
+        const MAX_DATA_POINTS = 60; // 图表只保留最近60秒的数据
+        
+        // === 初始化图表 ===
+        const chartDom = document.getElementById('chart-container');
+        const myChart = echarts.init(chartDom);
+        
+        // 数据队列
+        const xData = []; // 时间轴 (h:m:s)
+        const yData = []; // RPS 数据
+
+        // 基础图表配置
+        const option = {
+            backgroundColor: 'transparent',
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'cross', label: { backgroundColor: '#283b56' } },
+                formatter: '{b} <br/> RPS: {c}' // 鼠标悬停显示格式
+            },
+            grid: { top: 30, bottom: 30, left: 50, right: 30 },
+            xAxis: {
+                type: 'category',
+                boundaryGap: false,
+                data: xData,
+                axisLine: { lineStyle: { color: '#666' } },
+                axisLabel: { color: '#888' }
+            },
+            yAxis: {
+                type: 'value',
+                splitLine: { lineStyle: { color: '#333' } },
+                axisLine: { lineStyle: { color: '#666' } },
+                axisLabel: { color: '#888' }
+            },
+            series: [{
+                name: 'RPS',
+                type: 'line',
+                smooth: true, // 平滑曲线
+                symbol: 'none', // 去掉折线上的小圆点
+                lineStyle: { color: '#00ff41', width: 2 },
+                areaStyle: {
+                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                        { offset: 0, color: 'rgba(0, 255, 65, 0.5)' },
+                        { offset: 1, color: 'rgba(0, 255, 65, 0)' }
+                    ])
+                },
+                data: yData
+            }]
+        };
+
+        myChart.setOption(option);
+
+        // === 核心逻辑 ===
+        let lastTotal = null; // 用来存储上一秒的总数
+
+        async function fetchData() {
+            try {
+                const response = await fetch(API_URL);
+                const data = await response.json();
+
+                // 1. 获取当前总数
+                const currentTotal = data.total;
+                document.getElementById('total-display').innerText = currentTotal;
+                document.getElementById('conn-status').innerText = "LIVE";
+                document.getElementById('conn-status').style.color = "#00ff41";
+
+                // 2. 计算差值 (RPS)
+                let rps = 0;
+                
+                if (lastTotal !== null) {
+                    // 核心算法：本次 - 上次
+                    rps = currentTotal - lastTotal;
+                    
+                    // 防御性编程：如果是月度重置导致的负数，归零处理
+                    if (rps < 0) rps = 0;
+                } else {
+                    // 第一次请求，无法计算差值，视为 0
+                    rps = 0;
+                }
+
+                // 更新“记忆”
+                lastTotal = currentTotal;
+
+                // 3. 更新大数字显示
+                document.getElementById('rps-display').innerText = rps;
+
+                // 4. 更新图表
+                const now = new Date();
+                // 格式化时间为 HH:MM:SS
+                const timeStr = now.toLocaleTimeString('en-GB', { hour12: false });
+
+                xData.push(timeStr);
+                yData.push(rps);
+
+                // 保持队列长度，防止内存溢出
+                if (xData.length > MAX_DATA_POINTS) {
+                    xData.shift();
+                    yData.shift();
+                }
+
+                // 刷新图表
+                myChart.setOption({
+                    xAxis: { data: xData },
+                    series: [{ data: yData }]
+                });
+
+            } catch (error) {
+                console.error("Fetch Error:", error);
+                document.getElementById('conn-status').innerText = "DISCONNECTED";
+                document.getElementById('conn-status').style.color = "red";
+            }
+        }
+
+        // === 启动循环 ===
+        // 每 1000 毫秒 (1秒) 执行一次
+        setInterval(fetchData, 1000);
+        
+        // 窗口大小改变时自动重绘图表
+        window.addEventListener('resize', () => myChart.resize());
+
+    </script>
+</body>
+</html>
